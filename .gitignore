@@ -1,0 +1,17 @@
+# Gradle / Android
+.gradle/
+.kotlin/
+build/
+local.properties
+*.apk
+*.aab
+
+# Подпись релизов: ключи и пароли хранятся вне репозитория
+keystore.properties
+*.jks
+*.keystore
+
+# IDE
+.idea/
+*.iml
+.DS_Store
