@@ -21,7 +21,14 @@ import javax.net.ssl.SSLException
  * [name] — имя во Frigate, [stream] — основной поток в go2rtc, [liveStream] — поток для просмотра:
  * отдельная сессия `<поток>_live`, если она заведена (тогда нет ожидания ключевого кадра), иначе основной.
  */
-data class Camera(val server: Server, val name: String, val stream: String, val liveStream: String) {
+data class Camera(
+    val server: Server,
+    val name: String,
+    val stream: String,
+    val liveStream: String,
+    /** Поток для просмотра со звуком: основной (он может быть составным: видео камеры + микрофон другой камеры). */
+    val audioStream: String = liveStream,
+) {
     val http: String get() = server.base
     val rtsp: String get() = server.rtspBase
     val key: String get() = "${server.id}/$name"
@@ -134,7 +141,8 @@ object Api {
             // отдельная сессия для просмотра: `<поток>_live`, а если поток составной (например, видео + чужой звук),
             // то `<камера>_live`; иначе основной поток
             val liveStream = listOf("${stream}_live", "${name.lowercase()}_live").firstOrNull { it in live } ?: stream
-            result += Camera(server, name, stream, liveStream)
+            val audioStream = if ("${stream}_live" in live) "${stream}_live" else stream
+            result += Camera(server, name, stream, liveStream, audioStream)
         }
         Log.i(TAG, "${server.id} cameras: ${result.map { "${it.name}->${it.liveStream}" }}")
         return result

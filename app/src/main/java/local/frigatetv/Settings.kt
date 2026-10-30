@@ -12,6 +12,7 @@ object Settings {
     private const val PREFS = "frigate_tv"
     private const val KEY_V2 = "servers_v2"        // JSON-массив серверов
     private const val KEY_ORDER = "camera_order"    // JSON-объект: сервер → список камер
+    private const val KEY_LIVE_AUDIO = "live_audio"
     private const val KEY_V1 = "servers"            // прежний формат: адрес в строке
     private const val KEY_OLD = "server_host"       // самый первый формат: один адрес
 
@@ -46,6 +47,14 @@ object Settings {
         val o = JSONObject()
         order.forEach { (id, names) -> o.put(id, JSONArray(names)) }
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_ORDER, o.toString()).apply()
+    }
+
+    /** Звук в живом просмотре (по умолчанию выключен; включается после того, как видео догнало живой край). */
+    fun liveAudio(ctx: Context): Boolean =
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_LIVE_AUDIO, false)
+
+    fun setLiveAudio(ctx: Context, on: Boolean) {
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_LIVE_AUDIO, on).apply()
     }
 
     fun saveServers(ctx: Context, servers: List<Server>) {

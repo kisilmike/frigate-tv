@@ -3,7 +3,7 @@ package local.frigatetv
 /** Параметры по умолчанию. Адреса серверов задаются в приложении (Настройки). */
 object Config {
     const val APP_NAME = "Frigate TV"
-    const val APP_VERSION = "0.3.2"
+    const val APP_VERSION = "0.4"
     const val APP_DATE = "30.10.2026"
 
     const val FRIGATE_PORT = 5000
@@ -29,12 +29,14 @@ object Config {
      * Живой поток: плеер догоняет край буфера, ускоряя воспроизведение: скорость = 1 + (отставание - TARGET) / TAU,
      * не больше MAX. Нужно, потому что метки времени первого ключевого кадра отстают от часов плеера.
      */
-    const val LIVE_CATCHUP_TARGET_MS = 800L
-    const val LIVE_CATCHUP_TAU_MS = 600L
+    const val LIVE_CATCHUP_TARGET_MS = 1600L
+    const val LIVE_CATCHUP_TAU_MS = 900L
     const val LIVE_CATCHUP_MAX_SPEED = 12f
 
     /** Если живых кадров нет дольше этого времени, в подписи вместо «ЖИВОЙ» будет «нет кадров». */
     const val LIVE_STALL_MS = 3000L
+    /** Если кадров нет дольше этого, живой поток переподключается. */
+    const val LIVE_RESTART_MS = 5000L
 
     /** Одиночное нажатие ← / →. */
     const val TAP_STEP_SEC = 10.0

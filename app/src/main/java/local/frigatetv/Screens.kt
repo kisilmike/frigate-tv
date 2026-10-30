@@ -290,6 +290,13 @@ private fun ServerListPage(
             Spacer(Modifier.height(8.dp))
         }
         TvButton("+ Добавить сервер", (if (servers.isEmpty()) Modifier.focusRequester(first) else Modifier).width(560.dp)) { onEdit(-1) }
+        Spacer(Modifier.height(8.dp))
+        val ctx = LocalContext.current
+        var audio by remember { mutableStateOf(Settings.liveAudio(ctx)) }
+        TvButton("Звук в живом просмотре:  ${if (audio) "включён" else "выключен"}", Modifier.width(560.dp)) {
+            audio = !audio
+            Settings.setLiveAudio(ctx, audio)
+        }
         Spacer(Modifier.height(20.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
             TvButton("Готово", onClick = onDone)

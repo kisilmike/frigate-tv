@@ -7,7 +7,16 @@ import androidx.annotation.OptIn
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Text
@@ -76,10 +85,23 @@ fun PlayerScreen(cam: Camera, onSwitch: (Int) -> Unit, onExit: () -> Unit) {
     val exo = remember {
         // по умолчанию плеер копит 2,5 с перед стартом; для живого видео хватает 0,3 с
         val loadControl = DefaultLoadControl.Builder()
-            .setBufferDurationsMs(1000, 8000, 300, 600)
+            .setBufferDurationsMs(3000, 10000, 500, 1600)
             .setPrioritizeTimeOverSizeThresholds(true)
             .build()
         ExoPlayer.Builder(ctx).setLoadControl(loadControl).build()
+    }
+    val liveAudio = remember { Settings.liveAudio(ctx) }
+    // Звук живого просмотра: отдельный плеер на тот же адрес, но с отключённой видеодорожкой (RTSP тогда не грузит
+    // видео вовсе), со своим буфером. Звуковая дорожка в видеоплеере заставляла его ждать звук и подвисать.
+    val audioExo = remember {
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(1500, 6000, 1000, 1500)
+            .build()
+        ExoPlayer.Builder(ctx).setLoadControl(loadControl).build().apply {
+            trackSelectionParameters = trackSelectionParameters.buildUpon()
+                .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, true)
+                .build()
+        }
     }
     val focus = remember { FocusRequester() }
 
@@ -89,6 +111,8 @@ fun PlayerScreen(cam: Camera, onSwitch: (Int) -> Unit, onExit: () -> Unit) {
     var holdActive by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf("● ЖИВОЙ") }
     var error by remember { mutableStateOf<String?>(null) }
+    // есть ли звуковая дорожка в потоке (null — ещё не знаем)
+    var hasAudio by remember { mutableStateOf<Boolean?>(null) }
     var archive by remember { mutableStateOf<Archive?>(null) }
     var pendingSeekWall by remember { mutableStateOf<Double?>(null) }
     var cursor by remember { mutableStateOf<Double?>(null) }
@@ -163,6 +187,7 @@ fun PlayerScreen(cam: Camera, onSwitch: (Int) -> Unit, onExit: () -> Unit) {
         loadJob?.cancel()
         previewJob?.cancel()
         holdJob?.cancel()
+        lastFrameAt.set(SystemClock.elapsedRealtime())
         holdActive = false
         scrubbing = false
         inHistory = false
@@ -185,11 +210,26 @@ fun PlayerScreen(cam: Camera, onSwitch: (Int) -> Unit, onExit: () -> Unit) {
         exo.setMediaSource(source)
         exo.prepare()
         exo.playWhenReady = true
+        // при выключенном звуке плеер только узнаёт состав дорожек (DESCRIBE), ничего не загружая
+        audioExo.trackSelectionParameters = audioExo.trackSelectionParameters.buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, !liveAudio)
+            .build()
+        run {
+            audioExo.setMediaSource(
+                RtspMediaSource.Factory()
+                    .setForceUseRtpTcp(true)
+                    .setTimeoutMs(10_000)
+                    .createMediaSource(MediaItem.fromUri("${cam.rtsp}/${cam.audioStream}")),
+            )
+            audioExo.prepare()
+            audioExo.playWhenReady = liveAudio
+        }
     }
 
     /** Загрузить окно архива вокруг момента [center] и встать на него. */
     fun loadWindow(center: Double) {
         loadJob?.cancel()
+        audioExo.stop()
         setAudio(true)
         lastCenter = center
         inHistory = true
@@ -371,9 +411,20 @@ fun PlayerScreen(cam: Camera, onSwitch: (Int) -> Unit, onExit: () -> Unit) {
             }
         }
         exo.addListener(listener)
+        val audioListener = object : Player.Listener {
+            override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
+                if (tracks.groups.isEmpty()) return
+                hasAudio = tracks.containsType(C.TRACK_TYPE_AUDIO)
+                Log.i(TAG, "звуковая дорожка: $hasAudio")
+                if (!liveAudio) audioExo.stop()
+            }
+        }
+        audioExo.addListener(audioListener)
         onDispose {
             exo.removeListener(listener)
+            audioExo.removeListener(audioListener)
             exo.release()
+            audioExo.release()
         }
     }
 
@@ -390,6 +441,13 @@ fun PlayerScreen(cam: Camera, onSwitch: (Int) -> Unit, onExit: () -> Unit) {
                 1f
             }
             if (kotlin.math.abs(exo.playbackParameters.speed - want) > 0.15f) exo.setPlaybackSpeed(want)
+            // звуковой плеер: свой мягкий догон (высота тона не меняется), независимо от видео
+            if (liveAudio && !inHistory && audioExo.playbackState == Player.STATE_READY) {
+                val alag = audioExo.bufferedPosition - audioExo.currentPosition
+                val cur = audioExo.playbackParameters.speed
+                val aw = if (alag > 1800) 1.08f else if (alag < 1200) 1f else cur
+                if (aw != cur) audioExo.setPlaybackSpeed(aw)
+            }
             delay(50)
         }
     }
@@ -450,7 +508,14 @@ fun PlayerScreen(cam: Camera, onSwitch: (Int) -> Unit, onExit: () -> Unit) {
                 }
                 !liveReady -> "○ подключение…"
                 // состояние плеера (READY/BUFFERING) при почти пустом буфере мигает, поэтому смотрим на реальные кадры
-                SystemClock.elapsedRealtime() - lastFrameAt.get() > Config.LIVE_STALL_MS -> "○ нет кадров…"
+                SystemClock.elapsedRealtime() - lastFrameAt.get() > Config.LIVE_STALL_MS -> {
+                    // поток встал: через LIVE_RESTART_MS переподключаемся и набираем буфер заново
+                    if (SystemClock.elapsedRealtime() - lastFrameAt.get() > Config.LIVE_RESTART_MS) {
+                        Log.w(TAG, "нет кадров: state=${exo.playbackState} pos=${exo.currentPosition} buf=${exo.bufferedPosition} speed=${exo.playbackParameters.speed}")
+                        playLive("нет кадров, перезапуск")
+                    }
+                    "○ нет кадров…"
+                }
                 else -> "● ЖИВОЙ"
             }
             delay(200)
@@ -532,16 +597,26 @@ fun PlayerScreen(cam: Camera, onSwitch: (Int) -> Unit, onExit: () -> Unit) {
                 }
             }
         }
-        Text(
-            text = "${cam.name}   $status" + (error?.let { "   ⚠ $it" } ?: ""),
-            color = Color.White,
-            fontSize = 20.sp,
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
                 .align(Alignment.TopStart)
                 .padding(if (inHistory) 4.dp else 24.dp)
                 .background(Color(0x99000000))
                 .padding(horizontal = 12.dp, vertical = 6.dp),
-        )
+        ) {
+            Text(text = cam.name, color = Color.White, fontSize = 20.sp)
+            // значок звука: есть дорожка — динамик, в настройках звук выключен — перечёркнутый
+            if (hasAudio == true) {
+                Spacer(Modifier.width(8.dp))
+                SpeakerIcon(on = liveAudio || inHistory)
+            }
+            Text(
+                text = "   $status" + (error?.let { "   ⚠ $it" } ?: ""),
+                color = Color.White,
+                fontSize = 20.sp,
+            )
+        }
         if (inHistory) {
             Text(
                 text = "←/→ удержание: перемотка   OK: пауза   Назад: к живому",
@@ -566,4 +641,26 @@ private fun historyLabel(server: Server, wall: Double, paused: Boolean, loading:
     }
     val clock = clockFormat.format(Date((wall * 1000).toLong()))
     return "АРХИВ  $clock  $behind" + (if (loading) "  …" else "") + (if (paused) "  ⏸" else "")
+}
+
+/** Значок динамика; при [on] = false перечёркнут. */
+@Composable
+private fun SpeakerIcon(on: Boolean) {
+    val c = if (on) Color.White else Color(0xFFFF8A80)
+    Canvas(Modifier.size(24.dp)) {
+        val u = size.width / 24f
+        val body = Path().apply {
+            moveTo(3 * u, 9 * u); lineTo(7 * u, 9 * u); lineTo(12 * u, 4 * u)
+            lineTo(12 * u, 20 * u); lineTo(7 * u, 15 * u); lineTo(3 * u, 15 * u); close()
+        }
+        drawPath(body, c)
+        if (on) {
+            for (r in listOf(4f, 8f)) {
+                drawArc(c, -50f, 100f, false, Offset((12 - r + 1) * u, (12 - r) * u), androidx.compose.ui.geometry.Size(2 * r * u, 2 * r * u), style = Stroke(2 * u, cap = StrokeCap.Round))
+            }
+        } else {
+            drawLine(c, Offset(15 * u, 8 * u), Offset(22 * u, 16 * u), 2.2f * u, StrokeCap.Round)
+            drawLine(c, Offset(22 * u, 8 * u), Offset(15 * u, 16 * u), 2.2f * u, StrokeCap.Round)
+        }
+    }
 }
