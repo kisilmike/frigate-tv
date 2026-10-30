@@ -31,6 +31,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -45,7 +46,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
@@ -64,7 +67,15 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /** Состояние одного сервера на главном экране: камеры или ошибка подключения. */
-class Group(val server: Server, val cams: List<Camera>?, val error: String?)
+class Group(val server: Server, val cams: List<Camera>?, val error: String?) {
+    /** Камеры в порядке, выбранном пользователем; новые (которых нет в [names]) идут в конце в порядке конфига. */
+    fun ordered(names: List<String>?): Group {
+        val list = cams ?: return this
+        if (names.isNullOrEmpty()) return this
+        val rank = names.withIndex().associate { it.value to it.index }
+        return Group(server, list.sortedBy { rank[it.name] ?: Int.MAX_VALUE }, error)
+    }
+}
 
 @Composable
 fun App() {
@@ -74,6 +85,7 @@ fun App() {
     var opened by remember { mutableStateOf<Camera?>(null) }
     var lastKey by remember { mutableStateOf<String?>(null) }
     var showSettings by remember { mutableStateOf(false) }
+    var order by remember { mutableStateOf(Settings.loadOrder(ctx)) }
 
     // каждый сервер грузится независимо: недоступный не мешает остальным и опрашивается до успеха
     LaunchedEffect(servers) {
@@ -99,6 +111,8 @@ fun App() {
 
     val ordered = servers.mapNotNull { groups[it.id] }
     val anyLoaded = ordered.any { it.cams != null }
+    val shown = servers.map { s -> (groups[s.id] ?: Group(s, null, "загрузка…")).ordered(order[s.id]) }
+    val allCams = shown.flatMap { it.cams.orEmpty() }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         val cam = opened
@@ -112,10 +126,28 @@ fun App() {
                 }
             }
             !anyLoaded -> LoadingScreen(servers, ordered) { showSettings = true }
-            cam != null -> PlayerScreen(cam) { opened = null }
+            cam != null -> key(cam.key) {
+                PlayerScreen(
+                    cam,
+                    onSwitch = { dir ->
+                        val i = allCams.indexOfFirst { it.key == cam.key }
+                        if (i >= 0 && allCams.size > 1) {
+                            val next = allCams[(i + dir + allCams.size) % allCams.size]
+                            lastKey = next.key
+                            opened = next
+                        }
+                    },
+                ) { opened = null }
+            }
             else -> Column(Modifier.fillMaxSize()) {
                 Box(Modifier.weight(1f)) {
-                    GridScreen(servers.map { s -> groups[s.id] ?: Group(s, null, "загрузка…") }, servers.size > 1, lastKey) {
+                    GridScreen(
+                        shown, servers.size > 1, lastKey,
+                        onReorder = { id, names ->
+                            order = order + (id to names)
+                            Settings.saveOrder(ctx, order)
+                        },
+                    ) {
                         lastKey = it.key
                         opened = it
                     }
@@ -524,14 +556,23 @@ private fun TextInputPage(title: String, initial: String, secret: Boolean, onRes
 
 /** Камеры, сгруппированные по серверам (заголовки групп только если серверов больше одного). */
 @Composable
-fun GridScreen(groups: List<Group>, showHeaders: Boolean, focusKey: String?, onOpen: (Camera) -> Unit) {
+fun GridScreen(
+    groups: List<Group>,
+    showHeaders: Boolean,
+    focusKey: String?,
+    onReorder: (serverId: String, names: List<String>) -> Unit,
+    onOpen: (Camera) -> Unit,
+) {
     val focus = remember { FocusRequester() }
     val allKeys = groups.flatMap { g -> g.cams.orEmpty().map { it.key } }
+    // камера, которую сейчас переставляют (удержание OK), и подсказка в этом режиме
+    var moveKey by remember { mutableStateOf<String?>(null) }
+    BackHandler(enabled = moveKey != null) { moveKey = null }
     LaunchedEffect(allKeys) {
         delay(150)
         runCatching { focus.requestFocus() }
     }
-    val target = if (focusKey != null && focusKey in allKeys) focusKey else allKeys.firstOrNull()
+    val target = if (moveKey != null) moveKey else if (focusKey != null && focusKey in allKeys) focusKey else allKeys.firstOrNull()
     LazyVerticalGrid(
         columns = GridCells.Fixed(3),
         contentPadding = PaddingValues(24.dp),
@@ -564,6 +605,19 @@ fun GridScreen(groups: List<Group>, showHeaders: Boolean, focusKey: String?, onO
                     CameraTile(
                         cam = cam,
                         modifier = if (cam.key == target) Modifier.focusRequester(focus) else Modifier,
+                        moving = moveKey == cam.key,
+                        onStartMove = { moveKey = cam.key },
+                        onEndMove = { moveKey = null },
+                        onMove = { dir ->
+                            // переставляем только внутри своей группы (сервера)
+                            val names = cams.map { it.name }.toMutableList()
+                            val i = names.indexOf(cam.name)
+                            val j = i + dir
+                            if (i >= 0 && j in names.indices) {
+                                names[i] = names[j].also { names[j] = names[i] }
+                                onReorder(g.server.id, names)
+                            }
+                        },
                         onClick = { onOpen(cam) },
                     )
                 }
@@ -573,8 +627,17 @@ fun GridScreen(groups: List<Group>, showHeaders: Boolean, focusKey: String?, onO
 }
 
 @Composable
-fun CameraTile(cam: Camera, modifier: Modifier, onClick: () -> Unit) {
+fun CameraTile(
+    cam: Camera,
+    modifier: Modifier,
+    moving: Boolean,
+    onStartMove: () -> Unit,
+    onEndMove: () -> Unit,
+    onMove: (Int) -> Unit,
+    onClick: () -> Unit,
+) {
     var focused by remember { mutableStateOf(false) }
+    var longPressed by remember { mutableStateOf(false) }
     var frame by remember { mutableStateOf<ImageBitmap?>(null) }
 
     LaunchedEffect(cam.key) {
@@ -588,7 +651,42 @@ fun CameraTile(cam: Camera, modifier: Modifier, onClick: () -> Unit) {
         modifier
             .aspectRatio(16f / 9f)
             .onFocusChanged { focused = it.isFocused }
-            .border(if (focused) 4.dp else 1.dp, if (focused) Color.White else Color(0xFF333333))
+            // удержание OK: камера готова к перемещению (←/→), короткое OK фиксирует порядок
+            .onPreviewKeyEvent { ev ->
+                val k = ev.key
+                val down = ev.type == KeyEventType.KeyDown
+                when {
+                    moving && (k == Key.DirectionLeft || k == Key.DirectionRight) -> {
+                        if (down) onMove(if (k == Key.DirectionLeft) -1 else 1)
+                        true
+                    }
+                    moving && (k == Key.DirectionUp || k == Key.DirectionDown) -> true
+                    k == Key.DirectionCenter || k == Key.Enter || k == Key.NumPadEnter -> {
+                        when (ev.type) {
+                            KeyEventType.KeyDown -> {
+                                if (ev.nativeKeyEvent.repeatCount == 0) longPressed = false
+                                else if (!longPressed && !moving) {
+                                    longPressed = true
+                                    onStartMove()
+                                }
+                                true
+                            }
+                            KeyEventType.KeyUp -> {
+                                if (longPressed) longPressed = false
+                                else if (moving) onEndMove()
+                                else onClick()
+                                true
+                            }
+                            else -> false
+                        }
+                    }
+                    else -> false
+                }
+            }
+            .border(
+                if (focused || moving) 4.dp else 1.dp,
+                if (moving) Color(0xFFFFB74D) else if (focused) Color.White else Color(0xFF333333),
+            )
             .background(Color(0xFF111111))
             .clickable(onClick = onClick),
     ) {
@@ -601,7 +699,7 @@ fun CameraTile(cam: Camera, modifier: Modifier, onClick: () -> Unit) {
             )
         }
         Text(
-            text = cam.name,
+            text = if (moving) "↔  ${cam.name}   (←/→ переместить, OK: готово)" else cam.name,
             color = Color.White,
             fontSize = 18.sp,
             modifier = Modifier

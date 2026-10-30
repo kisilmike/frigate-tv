@@ -70,7 +70,7 @@ private val clockFormat = SimpleDateFormat("dd.MM HH:mm:ss", Locale.getDefault()
  */
 @OptIn(UnstableApi::class)
 @Composable
-fun PlayerScreen(cam: Camera, onExit: () -> Unit) {
+fun PlayerScreen(cam: Camera, onSwitch: (Int) -> Unit, onExit: () -> Unit) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     val exo = remember {
@@ -147,8 +147,19 @@ fun PlayerScreen(cam: Camera, onExit: () -> Unit) {
         }
     }
 
+    /**
+     * Звук нужен только в архиве. В живом RTSP со звуком плеер тянет время по звуковой дорожке, а ускорение для
+     * догона края буфера (см. ниже) рвёт звук и вгоняет плеер в постоянную буферизацию, поэтому в живом звук выключен.
+     */
+    fun setAudio(enabled: Boolean) {
+        exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_AUDIO, !enabled)
+            .build()
+    }
+
     fun playLive(why: String) {
         Log.i(TAG, "playLive: $why")
+        setAudio(false)
         loadJob?.cancel()
         previewJob?.cancel()
         holdJob?.cancel()
@@ -179,6 +190,7 @@ fun PlayerScreen(cam: Camera, onExit: () -> Unit) {
     /** Загрузить окно архива вокруг момента [center] и встать на него. */
     fun loadWindow(center: Double) {
         loadJob?.cancel()
+        setAudio(true)
         lastCenter = center
         inHistory = true
         error = null
@@ -468,6 +480,13 @@ fun PlayerScreen(cam: Camera, onExit: () -> Unit) {
                         }
                         if (up) stopHold()
                         true
+                    }
+                    // в живом просмотре ↑ / ↓ переключают на предыдущую / следующую камеру
+                    Key.DirectionUp, Key.DirectionDown -> {
+                        if (down && ev.nativeKeyEvent.repeatCount == 0 && !inHistory) {
+                            onSwitch(if (ev.key == Key.DirectionUp) -1 else 1)
+                        }
+                        !inHistory
                     }
                     Key.DirectionCenter, Key.Enter, Key.MediaPlayPause -> {
                         if (up && inHistory) {

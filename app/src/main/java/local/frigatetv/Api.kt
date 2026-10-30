@@ -131,7 +131,9 @@ object Api {
             val stream = streams?.keys()?.asSequence()?.firstOrNull()
                 ?.let { streams.getString(it) }
                 ?: name.lowercase()
-            val liveStream = if ("${stream}_live" in live) "${stream}_live" else stream
+            // отдельная сессия для просмотра: `<поток>_live`, а если поток составной (например, видео + чужой звук),
+            // то `<камера>_live`; иначе основной поток
+            val liveStream = listOf("${stream}_live", "${name.lowercase()}_live").firstOrNull { it in live } ?: stream
             result += Camera(server, name, stream, liveStream)
         }
         Log.i(TAG, "${server.id} cameras: ${result.map { "${it.name}->${it.liveStream}" }}")

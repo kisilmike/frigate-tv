@@ -14,8 +14,8 @@ android {
         applicationId = "local.frigatetv"
         minSdk = 26
         targetSdk = 34
-        versionCode = 4
-        versionName = "0.3.1"
+        versionCode = 5
+        versionName = "0.3.2"
     }
 
     // Подпись релиза: ключ и пароли лежат вне репозитория (keystore.properties, см. README).
